@@ -3,9 +3,9 @@ package proxy
 import "net/http"
 
 type HTTPRouter interface {
-	Match(req *http.Request) *HTTPRoute
+	Match(req *http.Request) (string, *HTTPRoute)
 	RegisterRoute(routeId string, route *HTTPRoute) HTTPRouter
-	DeregisterRoute(routeId string, route *HTTPRoute)
+	DeregisterRoute(routeId string)
 	SetMiddleware(middleware Middleware) HTTPRouter
 	Middleware() Middleware
 }
@@ -22,14 +22,14 @@ func NewHTTPRouter() *httpRouter {
 	}
 }
 
-func (r *httpRouter) Match(req *http.Request) *HTTPRoute {
-	for _, route := range r.routes {
-		if route.Rule(req) {
-			return route
+func (r *httpRouter) Match(req *http.Request) (string, *HTTPRoute) {
+	for id, route := range r.routes {
+		if route.Rule.Match(req) {
+			return id, route
 		}
 	}
 
-	return nil
+	return "", nil
 }
 
 func (r *httpRouter) SetMiddleware(middleware Middleware) HTTPRouter {
@@ -46,6 +46,6 @@ func (r *httpRouter) RegisterRoute(routeId string, route *HTTPRoute) HTTPRouter 
 	return r
 }
 
-func (r *httpRouter) DeregisterRoute(routeId string, route *HTTPRoute) {
+func (r *httpRouter) DeregisterRoute(routeId string) {
 	delete(r.routes, routeId)
 }

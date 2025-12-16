@@ -6,56 +6,78 @@ import (
 	"time"
 )
 
-type BufferedConn struct {
-	conn   net.Conn
-	reader *bufio.Reader
-	// writer *bufio.Writer
+type BufferedConn interface {
+	Read(p []byte) (int, error)
+	Peek(n int) ([]byte, error)
+	Write(b []byte) (n int, err error)
+	Close() error
+	LocalAddr() net.Addr
+	RemoteAddr() net.Addr
+	SetDeadline(t time.Time) error
+	SetReadDeadline(t time.Time) error
+	SetWriteDeadline(t time.Time) error
+	NetConn() net.Conn
+	Reader() *bufio.Reader
 }
 
-func NewBufferedConn(conn net.Conn) *BufferedConn {
-	return &BufferedConn{
+type bufferedConn struct {
+	conn   net.Conn
+	reader *bufio.Reader
+}
+
+func NewBufferedConn(conn net.Conn) BufferedConn {
+	r := bufio.NewReader(conn)
+
+	if r == nil {
+		return nil
+	}
+
+	return &bufferedConn{
 		conn:   conn,
-		reader: bufio.NewReader(conn),
-		// writer: bufio.NewWriter(conn),
+		reader: r,
 	}
 }
 
-func (c *BufferedConn) Read(p []byte) (int, error) {
+func (c *bufferedConn) Read(p []byte) (int, error) {
 	return c.reader.Read(p)
 }
 
-func (c *BufferedConn) Peek(n int) ([]byte, error) {
+func (c *bufferedConn) Peek(n int) ([]byte, error) {
 	return c.reader.Peek(n)
 }
 
-func (c *BufferedConn) Write(b []byte) (n int, err error) {
+func (c *bufferedConn) Write(b []byte) (n int, err error) {
 	return c.conn.Write(b)
 }
 
-// func (c *BufferedConn) Flush() error {
-// 	return c.writer.Flush()
-// }
-
-func (c *BufferedConn) Close() error {
+func (c *bufferedConn) Close() error {
 	return c.conn.Close()
 }
 
-func (c *BufferedConn) LocalAddr() net.Addr {
+func (c *bufferedConn) LocalAddr() net.Addr {
 	return c.conn.LocalAddr()
 }
 
-func (c *BufferedConn) RemoteAddr() net.Addr {
+func (c *bufferedConn) RemoteAddr() net.Addr {
 	return c.conn.RemoteAddr()
 }
 
-func (c *BufferedConn) SetDeadline(t time.Time) error {
+func (c *bufferedConn) SetDeadline(t time.Time) error {
 	return c.conn.SetDeadline(t)
 }
 
-func (c *BufferedConn) SetReadDeadline(t time.Time) error {
+func (c *bufferedConn) SetReadDeadline(t time.Time) error {
 	return c.conn.SetReadDeadline(t)
 }
 
-func (c *BufferedConn) SetWriteDeadline(t time.Time) error {
+func (c *bufferedConn) SetWriteDeadline(t time.Time) error {
 	return c.conn.SetWriteDeadline(t)
+}
+
+func (c *bufferedConn) NetConn() net.Conn {
+	return c.conn
+}
+
+func (c *bufferedConn) Reader() *bufio.Reader {
+	return c.reader
 }

@@ -1,3 +1,3 @@
-module aidanhopper/main
+module github.com/aidanhopper/proxy
 
-go 1.25.5
+go 1.25.1

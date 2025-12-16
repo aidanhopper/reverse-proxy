@@ -10,11 +10,12 @@ import (
 )
 
 type server struct {
-	mu                 sync.Mutex
-	listeners          map[string]net.Listener
-	tlsConfigCompilers map[string]TLSConfigCompiler
-	addEntryPoint      chan EntryPoint
-	removeEntryPoint   chan string
+	mu                sync.Mutex
+	listeners         map[string]net.Listener
+	tlsConfigHandlers map[string]TLSConfigHandler
+	addEntryPoint     chan EntryPoint
+	removeEntryPoint  chan string
+	filter            ConnFilter
 
 	tcpRuntime  *TCPRuntime
 	httpRuntime *HTTPRuntime
@@ -24,13 +25,18 @@ const initBufferSize = 100
 
 func NewServer() *server {
 	return &server{
-		listeners:          make(map[string]net.Listener),
-		tlsConfigCompilers: make(map[string]TLSConfigCompiler),
-		addEntryPoint:      make(chan EntryPoint, initBufferSize),
-		removeEntryPoint:   make(chan string, initBufferSize),
-		tcpRuntime:         &TCPRuntime{},
-		httpRuntime:        NewHTTPRuntime(),
+		listeners:         make(map[string]net.Listener),
+		tlsConfigHandlers: make(map[string]TLSConfigHandler),
+		addEntryPoint:     make(chan EntryPoint, initBufferSize),
+		removeEntryPoint:  make(chan string, initBufferSize),
+		tcpRuntime:        NewTCPRuntime(),
+		httpRuntime:       NewHTTPRuntime(),
+		filter:            nil,
 	}
+}
+
+func (s *server) SetFilter(filter ConnFilter) {
+	s.filter = filter
 }
 
 func (s *server) Serve(ctx context.Context) error {
@@ -44,72 +50,76 @@ func (s *server) Serve(ctx context.Context) error {
 	}
 }
 
-func (s *server) acceptLoop(ctx context.Context, e EntryPoint, ln net.Listener) {
+func (s *server) acceptLoop(ctx context.Context, e string, ln net.Listener) {
+	cancelCtx, cancel := context.WithCancel(ctx)
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			select {
 			case <-ctx.Done():
+				cancel()
 				return
 			default:
-				continue
 			}
 		}
 
-		go s.handleConnection(ctx, e, conn)
+		if conn == nil {
+			cancel()
+			return
+		}
+
+		go s.handleConnection(cancelCtx, e, conn)
 	}
 }
 
-func checkForClientHello(conn *BufferedConn) (bool, error) {
-	bytes, err := conn.Peek(1)
-	if err != nil {
-		return false, err
-	}
-	return bytes[0] == 0x16, nil
-}
-
-func (s *server) handleTLSConnection(ctx context.Context, e EntryPoint, conn *BufferedConn) {
+func (s *server) handleTLSConnection(ctx context.Context, e string, conn BufferedConn) {
 	log.Printf("%s | Handling connection as TLS\n", conn.RemoteAddr().String())
 
 	transport, err := GetTransport(conn.LocalAddr())
 	if err != nil {
-		conn.Close()
 		return
 	}
 
 	switch transport {
 	case TransportTCP:
-		if s.tcpRuntime.Claim(conn) {
-			s.tcpRuntime.Handle(conn)
+		if s.tcpRuntime.Claim(e, NewTCPContext(conn)) {
+			s.tcpRuntime.Handle(ctx, e, conn)
 			return
 		}
 	default:
-		conn.Close()
 		log.Printf(
 			"%s | TLS connection occuring over unsupported transport protocol: %s\n",
 			conn.RemoteAddr().String(),
 			transport,
 		)
+		conn.Close()
 		return
 	}
 
 	// terminate tls and check if http router claims
 
-	tlsConfigComiler, ok := s.tlsConfigCompilers[e.Id()]
+	tlsConfigHandler, ok := s.tlsConfigHandlers[e]
 	if !ok {
 		log.Printf(
-			"%s | TLS config server not configured for the entrypoint %s\n",
+			"%s | TLS config compiler not configured for the entrypoint %s\n",
 			conn.RemoteAddr().String(),
-			e.Id(),
+			e,
 		)
 		conn.Close()
 		return
 	}
 
-	tlsConfig, err := tlsConfigComiler.Compile(conn)
+	tlsInfo, err := PeekTLSClientHelloInfo(conn)
+	if err != nil {
+		conn.Close()
+		return
+	}
+
+	tlsConfig, err := tlsConfigHandler.HandleTLSConfig(tlsInfo)
 	if err != nil {
 		log.Printf(
-			"%s | TLS config server failed to serve TLS config with error: %s\n",
+			"%s | TLS config compiler failed to serve TLS config with error: %s\n",
 			conn.RemoteAddr().String(),
 			err,
 		)
@@ -131,17 +141,18 @@ func (s *server) handleTLSConnection(ctx context.Context, e EntryPoint, conn *Bu
 	}
 
 	// Assume protocol is https
-	err = s.httpRuntime.HandleTLSConnection(e, tlsConn)
+	err = s.httpRuntime.HandleTLSConnection(ctx, e, tlsConn)
 	if err != nil {
 		log.Printf(
 			"%s | HTTP runtime failed to handle TLS connection with error: %s\n",
 			conn.RemoteAddr().String(),
 			err,
 		)
+		conn.Close()
 	}
 }
 
-func (s *server) handleRawConnection(ctx context.Context, e EntryPoint, conn *BufferedConn) {
+func (s *server) handleRawConnection(ctx context.Context, e string, conn BufferedConn) {
 	log.Printf("%s | Handling connection as raw\n", conn.RemoteAddr().String())
 
 	transport, err := GetTransport(conn.LocalAddr())
@@ -151,14 +162,19 @@ func (s *server) handleRawConnection(ctx context.Context, e EntryPoint, conn *Bu
 	}
 
 	// Check if connection is HTTP/1.1 and a match
-	if s.httpRuntime.Claim(conn) {
-		err = s.httpRuntime.HandleRawConnection(e, conn)
+	if s.httpRuntime.Claim(e, conn) {
+		log.Printf(
+			"%s | Raw connection determined to be HTTP/1.1\n",
+			conn.RemoteAddr().String(),
+		)
+		err = s.httpRuntime.HandleRawConnection(ctx, e, conn)
 		if err != nil {
 			log.Printf(
 				"%s | HTTP runtime failed to handle raw connection with error: %s\n",
 				conn.RemoteAddr().String(),
 				err,
 			)
+			conn.Close()
 		}
 		return
 	}
@@ -166,33 +182,54 @@ func (s *server) handleRawConnection(ctx context.Context, e EntryPoint, conn *Bu
 	// Otherwise send to fallback
 	switch transport {
 	case TransportTCP:
-		if s.tcpRuntime.Claim(conn) {
-			s.tcpRuntime.Handle(conn)
-		} else {
-			log.Printf("Could not find a matching route for request from %s\n", conn.RemoteAddr())
+		if s.tcpRuntime.Claim(e, NewTCPContext(conn)) {
+			s.tcpRuntime.Handle(ctx, e, conn)
+			return
 		}
 	case TransportUDP:
 		// not implemented
-		conn.Close()
 	case TransportUnix:
 		// not implemented
-		conn.Close()
-		return
-	default:
-		conn.Close()
 	}
+
+	log.Printf("%s | Could not determine a runtime to handle request\n", conn.RemoteAddr())
+	conn.Close()
 }
 
-func (s *server) handleConnection(ctx context.Context, e EntryPoint, conn net.Conn) {
+type ConnFilter interface {
+	KeepConnection(net.Conn) bool
+}
+
+type ConnFilterFunc func(conn net.Conn) bool
+
+func (f ConnFilterFunc) KeepConnection(conn net.Conn) bool {
+	return f(conn)
+}
+
+func (s *server) handleConnection(ctx context.Context, e string, conn net.Conn) {
+	if conn == nil {
+		log.Println("net.Conn is nil")
+		return
+	}
+
+	if s.filter != nil && !s.filter.KeepConnection(conn) {
+		conn.Close()
+		return
+	}
+
 	bufferedConn := NewBufferedConn(conn)
+	if bufferedConn == nil {
+		conn.Close()
+		return
+	}
 
 	log.Printf(
-		"%s | Connection recieved to local address %s\n",
+		"%s | Connection recieved to entrypoint \"%s\"\n",
 		conn.RemoteAddr().String(),
-		conn.LocalAddr().String(),
+		e,
 	)
 
-	isClientHello, err := checkForClientHello(bufferedConn)
+	isClientHello, err := CheckForClientHello(bufferedConn)
 	if err != nil {
 		conn.Close()
 		return
@@ -202,14 +239,13 @@ func (s *server) handleConnection(ctx context.Context, e EntryPoint, conn net.Co
 	// It is the Servers sole responsibility to handle decryption when needed.
 	// The server can ask the routers what certs to use.
 	if isClientHello {
-		if _, ok := s.tlsConfigCompilers[e.Id()]; ok {
+		if _, ok := s.tlsConfigHandlers[e]; ok {
 			s.handleTLSConnection(ctx, e, bufferedConn)
 		} else {
 			log.Printf(
-				"%s | TLS connection recieved but no config server is available to handle it\n",
+				"%s | TLS connection recieved but no config compiler is available to handle it\n",
 				conn.RemoteAddr().String(),
 			)
-			conn.Close()
 		}
 	} else {
 		s.handleRawConnection(ctx, e, bufferedConn)
@@ -232,7 +268,7 @@ func (s *server) startEntryPoint(ctx context.Context, e EntryPoint) {
 
 	s.listeners[e.Id()] = ln
 
-	go s.acceptLoop(ctx, e, ln)
+	go s.acceptLoop(ctx, e.Id(), ln)
 }
 
 func (s *server) stopEntryPoint(id string) {
@@ -265,10 +301,18 @@ func (s *server) DeregisterHTTPHandler(entryPointId string) {
 	s.httpRuntime.DeregisterHandler(entryPointId)
 }
 
-func (s *server) RegisterTLSConfigCompiler(entryPointId string, tls TLSConfigCompiler) {
-	s.tlsConfigCompilers[entryPointId] = tls
+func (s *server) RegisterTCPHandler(entryPointId string, handler TCPHandler) {
+	s.tcpRuntime.RegisterHandler(entryPointId, handler)
 }
 
-func (s *server) DeregisterTLSConfigServer(entryPointId string) {
-	delete(s.tlsConfigCompilers, entryPointId)
+func (s *server) DeregisterTCPHandler(entryPointId string) {
+	s.tcpRuntime.DeregisterHandler(entryPointId)
+}
+
+func (s *server) RegisterTLSConfigHandler(entryPointId string, tls TLSConfigHandler) {
+	s.tlsConfigHandlers[entryPointId] = tls
+}
+
+func (s *server) DeregisterTLSConfigHandler(entryPointId string) {
+	delete(s.tlsConfigHandlers, entryPointId)
 }

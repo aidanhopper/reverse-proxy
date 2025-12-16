@@ -9,3 +9,13 @@ services:
     restart: unless-stopped
     ports:
       - 8096:8096
+  mc:
+    image: itzg/minecraft-server:latest
+    pull_policy: daily
+    tty: true
+    stdin_open: true
+    ports:
+      - "25566:25565"
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.21.10"

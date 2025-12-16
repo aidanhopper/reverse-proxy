@@ -14,7 +14,7 @@ func Logging(prefix string) Middleware {
 	})
 }
 
-func TrimPathPrefix(prefix string) Middleware {
+func StripPrefix(prefix string) Middleware {
 	return MiddlewareFunc(func(w http.ResponseWriter, r *http.Request, next http.Handler) {
 		if strings.HasPrefix(r.URL.Path, prefix) {
 			r2 := r.Clone(r.Context())

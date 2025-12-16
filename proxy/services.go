@@ -2,12 +2,15 @@ package proxy
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 )
 
 func UpgradeToSecure() http.Handler {
@@ -21,18 +24,18 @@ func FileServer(dir string) http.Handler {
 	return http.FileServer(http.Dir(dir))
 }
 
-func LoadBalance(targets ...string) http.Handler {
+func HTTPLoadBalancer(services ...http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if len(targets) == 0 {
-			log.Printf("No targets to load balance")
-			http.NotFoundHandler()
-		}
+		target := services[rand.Uint32()%uint32(len(services))]
+		target.ServeHTTP(w, r)
+	})
+}
 
-		target := targets[rand.Uint32()%uint32(len(targets))]
-
-		targetURL, err := url.Parse(target)
+func HTTPReverseProxy(address string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetURL, err := url.Parse(address)
 		if err != nil {
-			log.Printf("Invalid target address provided: %s. Error: %v", target, err)
+			log.Printf("Invalid target address provided: %s. Error: %v", address, err)
 			http.NotFoundHandler()
 		}
 
@@ -75,5 +78,34 @@ func PathRedirect(path string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		target := fmt.Sprintf("%s://%s%s", getProtocol(r), r.Host, path)
 		http.Redirect(w, r, target, http.StatusMovedPermanently)
+	})
+}
+
+func TCPReverseProxy(address string) TCPServiceFunc {
+	return TCPServiceFunc(func(conn *BufferedTCPConn) {
+		remote, err := net.Dial("tcp", address)
+		if err != nil {
+			log.Printf("Failed to dial with error: %s\n", err)
+			return
+		}
+
+		var wc sync.WaitGroup
+
+		wc.Go(func() {
+			io.Copy(conn, remote)
+		})
+
+		wc.Go(func() {
+			io.Copy(remote, conn)
+		})
+
+		wc.Wait()
+	})
+}
+
+func TCPLoadBalancer(services ...TCPServiceFunc) TCPServiceFunc {
+	return TCPServiceFunc(func(conn *BufferedTCPConn) {
+		target := services[rand.Uint32()%uint32(len(services))]
+		target(conn)
 	})
 }

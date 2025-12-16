@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -34,13 +35,16 @@ func (l *singleConnListener) Accept() (net.Conn, error) {
 func (l *singleConnListener) Close() error   { return nil }
 func (l *singleConnListener) Addr() net.Addr { return l.conn.LocalAddr() }
 
-func (r *HTTPRuntime) HandleTLSConnection(e EntryPoint, conn *tls.Conn) error {
-	handler, ok := r.handlers[e.Id()]
+func (r *HTTPRuntime) HandleTLSConnection(ctx context.Context, e string, conn *tls.Conn) error {
+	handler, ok := r.handlers[e]
 	if !ok {
 		conn.Close()
 		return fmt.Errorf("No handlers registered for this entrypoint")
 	}
-	srv := &http.Server{Handler: handler}
+	srv := &http.Server{
+		Handler:     handler,
+		BaseContext: func(net.Listener) context.Context { return ctx },
+	}
 	err := srv.Serve(&singleConnListener{conn: conn})
 	if err != io.EOF {
 		return err
@@ -48,13 +52,15 @@ func (r *HTTPRuntime) HandleTLSConnection(e EntryPoint, conn *tls.Conn) error {
 	return nil
 }
 
-func (r *HTTPRuntime) HandleRawConnection(e EntryPoint, conn *BufferedConn) error {
-	handler, ok := r.handlers[e.Id()]
+func (r *HTTPRuntime) HandleRawConnection(ctx context.Context, e string, conn BufferedConn) error {
+	handler, ok := r.handlers[e]
 	if !ok {
-		conn.Close()
 		return fmt.Errorf("No handlers registered for this entrypoint")
 	}
-	srv := &http.Server{Handler: handler}
+	srv := &http.Server{
+		Handler:     handler,
+		BaseContext: func(net.Listener) context.Context { return ctx },
+	}
 	err := srv.Serve(&singleConnListener{conn: conn})
 	if err != io.EOF {
 		return err
@@ -62,9 +68,37 @@ func (r *HTTPRuntime) HandleRawConnection(e EntryPoint, conn *BufferedConn) erro
 	return nil
 }
 
-func (r *HTTPRuntime) Claim(conn *BufferedConn) bool {
-	// will claim a HTTP/1.1 connection when needed
-	return true
+func (r *HTTPRuntime) Claim(e string, conn BufferedConn) bool {
+	if _, ok := r.handlers[e]; !ok {
+		return false
+	}
+
+	if ok, _ := CheckForClientHello(conn); ok {
+		return true
+	}
+
+	data, err := conn.Peek(5)
+	if err != nil {
+		return false
+	}
+
+	s := string(data)
+
+	switch s {
+	case
+		"GET /",
+		"HEAD ",
+		"POST ",
+		"PUT /",
+		"DELET",
+		"CONNE",
+		"OPTIO",
+		"TRACE",
+		"PATCH":
+		return true
+	}
+
+	return false
 }
 
 func (r *HTTPRuntime) RegisterHandler(entryPointId string, handler http.Handler) {
