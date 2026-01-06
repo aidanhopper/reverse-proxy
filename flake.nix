@@ -3,11 +3,10 @@
 
   inputs.nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0.1"; # unstable Nixpkgs
 
-  outputs =
-    { self, ... }@inputs:
+  outputs = { ... }@inputs:
 
     let
-      goVersion = 24; # Change this to update the whole stack
+      goVersion = 25; # Change this to update the whole stack
 
       supportedSystems = [
         "x86_64-linux"
@@ -37,17 +36,24 @@
         {
           default = pkgs.mkShellNoCC {
             packages = with pkgs; [
-              # go (version is specified by overlay)
               go
-
-              # goimports, godoc, etc.
               gotools
-
-              # https://github.com/golangci/golangci-lint
+              procps
               golangci-lint
             ];
           };
         }
       );
+
+      packages = forEachSupportedSystem ({pkgs}: {
+        proxyd = pkgs.writeShellApplication {
+          name = "proxyd";
+          runtimeInputs = [ pkgs.go ];
+          text = ''
+            cd ${./.}/proxyd
+            ${pkgs.go}/bin/go run main.go "$@"
+          '';
+        };
+      });
     };
 }

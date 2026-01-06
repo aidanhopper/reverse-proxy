@@ -1,0 +1,49 @@
+entrypoints:
+  web: ":80"
+  websecure: ":443"
+
+http:
+  middlewares:
+    - require-secure
+  routes:
+    # each route gets its own router, then the compiler can
+    # compile multiple routers for each entrypoint based on
+    # whether the route in yaml requires it
+    jellyfin-route:
+      rule: "Host('jellyfin.com')"
+      service: jellyfin
+      middlewares:
+        - set-forwarding-headers
+      entrypoints:
+        - web
+        - websecure
+      tls: auto
+
+    fileserver-route:
+      rule: Host('cpts.fileserver.com')
+      service: cpts-fileserver
+      entrypoints:
+        - web
+        - websecure
+      tls: auto
+
+  services:
+    jellyfin:
+      reverse-proxy: "127.0.0.1:8096"
+      load-balancer:
+        method: random 
+        services:
+          - reverse-proxy: "127.0.0.1:8096"
+
+
+
+tcp:
+
+  routes:
+    vanilla-route:
+      rule: HostMinecraft('vanilla.mc') AND NotPlayerMinecraft('asdf')
+      service: vanilla
+
+  services:
+    vanilla:
+      reverse-proxy: "127.0.0.1:8096"

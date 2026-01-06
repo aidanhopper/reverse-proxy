@@ -1,10 +1,12 @@
-package proxy
+package engine
 
-import "net"
+import (
+	"net"
+)
 
 type TCPEntryPoint struct {
-	Identifer string
-	Address   string
+	Identifier string
+	Address    string
 }
 
 func (e TCPEntryPoint) Listen() (net.Listener, error) {
@@ -12,5 +14,5 @@ func (e TCPEntryPoint) Listen() (net.Listener, error) {
 }
 
 func (e TCPEntryPoint) Id() string {
-	return e.Identifer
+	return e.Identifier
 }

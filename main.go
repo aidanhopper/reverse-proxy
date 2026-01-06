@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/aidanhopper/proxy/proxy"
+	"github.com/aidanhopper/reverse-proxy/proxy-engine/engine"
+	"github.com/aidanhopper/reverse-proxy/proxyd/proxyd"
 )
 
-func BasicTLS() proxy.TLSConfigHandler {
-	return proxy.TLSConfigHandlerFunc(func(info *tls.ClientHelloInfo) (*tls.Config, error) {
+func BasicTLS() engine.TLSConfigHandler {
+	return engine.TLSConfigHandlerFunc(func(info *tls.ClientHelloInfo) (*tls.Config, error) {
 		cert, err := tls.LoadX509KeyPair("cert/server.crt", "cert/server.key")
 		if err != nil {
 			return nil,
@@ -29,7 +30,7 @@ func BasicTLS() proxy.TLSConfigHandler {
 // 5. Add server level filter, could check IPs as a whitelist or do rate limiting
 
 func main() {
-	server := proxy.NewServer()
+	server := engine.NewServer()
 
 	server.SetFilter(nil)
 
@@ -39,103 +40,103 @@ func main() {
 	)
 
 	server.RegisterEntryPoint(
-		proxy.TCPEntryPoint{
-			Identifer: "web-secure",
+		engine.TCPEntryPoint{
+			Identifier: "web-secure",
 			Address:   ":443",
 		},
 	)
 
 	server.RegisterEntryPoint(
-		proxy.TCPEntryPoint{
-			Identifer: "web",
+		engine.TCPEntryPoint{
+			Identifier: "web",
 			Address:   ":80",
 		},
 	)
 
 	server.RegisterEntryPoint(
-		proxy.TCPEntryPoint{
-			Identifer: "minecraft",
+		engine.TCPEntryPoint{
+			Identifier: "minecraft",
 			Address:   ":25565",
 		},
 	)
 
-	httpCompiler := proxy.NewHTTPHandlerCompiler()
+	httpCompiler := engine.NewHTTPHandlerCompiler()
 	httpCompiler.
 		RegisterService(
 			"whoami service",
-			proxy.HTTPReverseProxy("http://localhost:9999"),
+			engine.HTTPReverseProxy("http://localhost:9999"),
 		).
 		RegisterService(
 			"jellyfin redirect service",
-			proxy.PathRedirect("/jellyfin/"),
+			engine.PathRedirect("/jellyfin/"),
 		).
 		RegisterService(
 			"jellyfin service",
-			proxy.HTTPReverseProxy("http://localhost:8096"),
+			engine.HTTPReverseProxy("http://localhost:8096"),
 		).
 		RegisterService(
 			"cpts355",
-			proxy.FileServer("../cpts355"),
+			engine.FileServer("../cpts355"),
 		).
 		RegisterRouter("router 1").
-		SetMiddleware(proxy.Chain(
-			proxy.RequireSecure(),
-			proxy.SetForwardingHeaders(),
+		SetMiddleware(engine.Chain(
+			engine.RequireSecure(),
+			engine.SetForwardingHeaders(),
 		)).
 		RegisterRoute(
 			"whoami route",
-			&proxy.HTTPRoute{
+			&engine.HTTPRoute{
 				ServiceId: "whoami service",
-				Rule: proxy.And(
-					proxy.PathPrefix("/abc"),
+				Rule: engine.And(
+					engine.PathPrefix("/abc"),
 				),
 			},
 		).
 		RegisterRoute(
 			"jellyfin route",
-			&proxy.HTTPRoute{
+			&engine.HTTPRoute{
 				ServiceId: "jellyfin service",
-				Rule: proxy.And(
-					proxy.PathRegexp("/jellyfin/"),
+				Rule: engine.And(
+					engine.PathRegexp("/jellyfin/"),
 				),
-				Middleware: proxy.Chain(
-					proxy.StripPrefix("/jellyfin/"),
+				Middleware: engine.Chain(
+					engine.StripPrefix("/jellyfin/"),
 				),
 			},
 		).
 		RegisterRoute(
 			"jellyfin redirect route",
-			&proxy.HTTPRoute{
+			&engine.HTTPRoute{
 				ServiceId: "jellyfin redirect service",
-				Rule: proxy.And(
-					proxy.PathRegexp("^/jellyfin$"),
+				Rule: engine.And(
+					engine.PathRegexp("^/jellyfin$"),
 				),
 			},
 		).
 		RegisterRoute(
 			"cpts355 file server",
-			&proxy.HTTPRoute{
+			&engine.HTTPRoute{
 				ServiceId: "cpts355",
-				Rule: proxy.And(
-					proxy.PathPrefix("/files"),
+				Rule: engine.And(
+					engine.PathPrefix("/files"),
 				),
-				Middleware: proxy.StripPrefix("/files"),
+				Middleware: engine.StripPrefix("/files"),
 			},
 		)
 
-	tcpCompiler := proxy.NewTCPHandlerCompiler()
+	tcpCompiler := engine.NewTCPHandlerCompiler()
 	tcpCompiler.
 		RegisterService(
 			"vanilla minecraft",
-			proxy.TCPReverseProxy("vanilla.mc:25565"),
+			engine.TCPReverseProxy("vanilla.mc:25565"),
 		).
 		RegisterRouter("router 1").
 		RegisterRoute(
 			"complex route",
-			&proxy.TCPRoute{
+			&engine.TCPRoute{
 				ServiceId: "vanilla minecraft",
-				Rule: proxy.And(
-					proxy.HostMinecraft(
+				Rule: engine.And(
+					engine.HostMinecraft(
 						"localhost",
 					),
 				),
